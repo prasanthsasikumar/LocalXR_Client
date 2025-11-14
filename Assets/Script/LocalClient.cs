@@ -2,6 +2,11 @@ using UnityEngine;
 using Photon.Pun;
 using Photon.Realtime;
 
+/// <summary>
+/// Local client for receiving and visualizing remote player's face/gaze data.
+/// Set instantiateOwnPlayer = FALSE to only observe remote players.
+/// Set instantiateOwnPlayer = TRUE if you also want to track your own position.
+/// </summary>
 public class LocalClient : MonoBehaviourPunCallbacks
 {
     public float moveSpeed = 5f;
@@ -14,6 +19,10 @@ public class LocalClient : MonoBehaviourPunCallbacks
     [Header("VR Setup")]
     public bool isVRMode = true;
     public Transform vrCamera; // Assign your VR camera/head transform
+    
+    [Header("Network Mode")]
+    [Tooltip("TRUE = Instantiate own player (for local tracking). FALSE = Only observe remote players (for face/gaze visualization).")]
+    public bool instantiateOwnPlayer = false; // Set to FALSE to only observe remote players
     
     private MeshAlignmentTool meshAlignmentTool;
 
@@ -57,29 +66,109 @@ public class LocalClient : MonoBehaviourPunCallbacks
         Debug.Log("LocalClient joined room: " + PhotonNetwork.CurrentRoom.Name);
         Debug.Log("Players in room: " + PhotonNetwork.CurrentRoom.PlayerCount);
 
-        // Instantiate player representation
-        Vector3 spawnPos = localPosition;
-        localPlayerRepresentation = PhotonNetwork.Instantiate("LocalClientCube", spawnPos, Quaternion.identity);
-        localPlayerRepresentation.name = "LocalPlayer_" + PhotonNetwork.NickName;
-
-        // Ensure initial alignment to VR headset immediately after spawn
-        if (isVRMode && vrCamera != null)
+        // Only instantiate player if enabled
+        if (instantiateOwnPlayer)
         {
-            localPlayerRepresentation.transform.SetPositionAndRotation(vrCamera.position, vrCamera.rotation);
+            // Instantiate player representation
+            Vector3 spawnPos = localPosition;
+            localPlayerRepresentation = PhotonNetwork.Instantiate("LocalClientCube", spawnPos, Quaternion.identity);
+            localPlayerRepresentation.name = "LocalPlayer_" + PhotonNetwork.NickName;
+
+            // Ensure initial alignment to VR headset immediately after spawn
+            if (isVRMode && vrCamera != null)
+            {
+                localPlayerRepresentation.transform.SetPositionAndRotation(vrCamera.position, vrCamera.rotation);
+            }
+
+            // Prevent physics from pulling the local representation down
+            var rb = localPlayerRepresentation.GetComponent<Rigidbody>();
+            var pv = localPlayerRepresentation.GetComponent<PhotonView>();
+            if (rb != null && pv != null && pv.IsMine)
+            {
+                rb.useGravity = false;
+                rb.isKinematic = true;
+            }
+            
+            Debug.Log("LocalClient: Instantiated own player representation");
         }
-
-        // Prevent physics from pulling the local representation down
-        var rb = localPlayerRepresentation.GetComponent<Rigidbody>();
-        var pv = localPlayerRepresentation.GetComponent<PhotonView>();
-        if (rb != null && pv != null && pv.IsMine)
+        else
         {
-            rb.useGravity = false;
-            rb.isKinematic = true;
+            Debug.Log("LocalClient: NOT instantiating own player - will only OBSERVE remote players for face/gaze data");
+            
+            // Setup visualization for any existing remote players
+            StartCoroutine(SetupRemotePlayerVisualization());
+        }
+    }
+    
+    /// <summary>
+    /// Automatically adds PhotonFaceGazeReceiver to remote player objects for visualization
+    /// </summary>
+    private System.Collections.IEnumerator SetupRemotePlayerVisualization()
+    {
+        // Wait for remote player objects to be instantiated
+        yield return new WaitForSeconds(0.5f);
+        
+        // Find all PhotonViews that are NOT ours (remote players)
+        PhotonView[] allViews = FindObjectsByType<PhotonView>(FindObjectsSortMode.None);
+        
+        int remoteCount = 0;
+        foreach (PhotonView view in allViews)
+        {
+            // Skip our own objects
+            if (view.IsMine)
+                continue;
+            
+            // This is a remote player's object
+            if (view.Owner != null)
+            {
+                Debug.Log($"[LocalClient] Found remote player: {view.Owner.NickName} on GameObject: {view.gameObject.name}");
+                
+                // Add receiver for visualization if not present
+                PhotonFaceGazeReceiver receiver = view.GetComponent<PhotonFaceGazeReceiver>();
+                if (receiver == null)
+                {
+                    receiver = view.gameObject.AddComponent<PhotonFaceGazeReceiver>();
+                    receiver.showDebugInfo = true;
+                    Debug.Log($"[LocalClient] Added PhotonFaceGazeReceiver to remote player: {view.Owner.NickName}");
+                }
+                
+                remoteCount++;
+            }
+        }
+        
+        if (remoteCount == 0)
+        {
+            Debug.Log("[LocalClient] No remote players found yet. Will add receiver when they join.");
         }
     }
 
     void Update()
     {
+        // Only update if we instantiated our own player
+        if (!instantiateOwnPlayer)
+        {
+            // We're in observer mode - just track camera for navigation
+            if (isVRMode)
+            {
+                if (vrCamera == null)
+                {
+                    TryResolveVRCamera();
+                }
+                if (vrCamera != null)
+                {
+                    localPosition = vrCamera.position;
+                    localRotation = vrCamera.rotation;
+                }
+            }
+            else if (meshAlignmentTool == null || !meshAlignmentTool.alignmentMode)
+            {
+                HandleMovement();
+            }
+            return; // Don't update networked player since we don't have one
+        }
+        
+        // Below only runs if we instantiated our own player
+        
         // Always track VR headset if available, even in alignment mode
         if (isVRMode)
         {
@@ -176,11 +265,17 @@ public class LocalClient : MonoBehaviourPunCallbacks
 
     public override void OnPlayerEnteredRoom(Player newPlayer)
     {
-        Debug.Log("New player joined: " + newPlayer.NickName);
+        Debug.Log($"[LocalClient] New player joined: {newPlayer.NickName}");
+        
+        // If we're in observer mode, set up visualization for the new player
+        if (!instantiateOwnPlayer)
+        {
+            StartCoroutine(SetupRemotePlayerVisualization());
+        }
     }
 
     public override void OnPlayerLeftRoom(Player otherPlayer)
     {
-        Debug.Log("Player left: " + otherPlayer.NickName);
+        Debug.Log($"[LocalClient] Player left: {otherPlayer.NickName}");
     }
 }
