@@ -15,6 +15,9 @@ GameObject:
   - component: {fileID: 37555018579508751}
   - component: {fileID: -8920758581739459899}
   - component: {fileID: 673779865687843939}
+  - component: {fileID: 551234567890123456}
+  - component: {fileID: 551234567890123457}
+  - component: {fileID: 551234567890123458}
   m_Layer: 0
   m_Name: LocalClientCube
   m_TagString: Untagged
@@ -135,9 +138,68 @@ MonoBehaviour:
   ObservedComponents:
   - {fileID: -8920758581739459899}
   - {fileID: 673779865687843939}
+  - {fileID: 551234567890123456}
   sceneViewId: 0
   InstantiationId: 0
   isRuntimeInstantiated: 0
+--- !u!114 &551234567890123456
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 5211230991188114271}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 510f4c1f47f5137419647030c6d1bbd4, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  faceMeshReceiver: {fileID: 551234567890123457}
+  gazeReceiver: {fileID: 551234567890123458}
+  transmissionInterval: 1
+  transmitFaceMesh: 1
+  transmitGaze: 1
+  keyLandmarksCount: 20
+  compressLandmarks: 1
+  showDebugLogs: 0
+--- !u!114 &551234567890123457
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 5211230991188114271}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 18a24421eded02542b26a1b68a12de23, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  streamName: FaceMesh
+  streamType: FaceLandmarks
+  channelCount: 204
+  resolveTimeout: 2
+  pullTimeout: 0
+  logEveryFrame: 0
+  logInterval: 5
+--- !u!114 &551234567890123458
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 5211230991188114271}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 73208b9755275c14aae26724912edc9d, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  streamName: EyeGaze
+  streamType: Gaze
+  channelCount: 3
+  resolveTimeout: 2
+  pullTimeout: 0
+  logEveryFrame: 1
+  logInterval: 0.5
 --- !u!114 &-8920758581739459899
 MonoBehaviour:
   m_ObjectHideFlags: 0
