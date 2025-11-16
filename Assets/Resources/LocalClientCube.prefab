@@ -161,7 +161,7 @@ MonoBehaviour:
   transmitGaze: 1
   keyLandmarksCount: 20
   compressLandmarks: 1
-  showDebugLogs: 0
+  showDebugLogs: 1
 --- !u!114 &551234567890123457
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -169,7 +169,7 @@ MonoBehaviour:
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 5211230991188114271}
-  m_Enabled: 1
+  m_Enabled: 0
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 18a24421eded02542b26a1b68a12de23, type: 3}
   m_Name: 
@@ -188,7 +188,7 @@ MonoBehaviour:
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 5211230991188114271}
-  m_Enabled: 1
+  m_Enabled: 0
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 73208b9755275c14aae26724912edc9d, type: 3}
   m_Name: 

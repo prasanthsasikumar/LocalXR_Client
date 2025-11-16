@@ -97,6 +97,12 @@ public class PhotonFaceGazeTransmitter : MonoBehaviourPun, IPunObservable
             if (gazeReceiver == null)
                 gazeReceiver = GetComponent<LslGazeReceiver>();
             
+            // CRITICAL: Enable LSL receivers only on the owner (Remote client that sends data)
+            if (faceMeshReceiver != null)
+                faceMeshReceiver.enabled = true;
+            if (gazeReceiver != null)
+                gazeReceiver.enabled = true;
+            
             if (showDebugLogs)
             {
                 Debug.Log($"PhotonFaceGazeTransmitter (REMOTE/TRANSMITTER mode). Face: {faceMeshReceiver != null}, Gaze: {gazeReceiver != null}");
@@ -105,6 +111,23 @@ public class PhotonFaceGazeTransmitter : MonoBehaviourPun, IPunObservable
         else
         {
             // This is a remote player instance on the local client - we only receive data
+            // CRITICAL: Disable LSL receivers on remote instances (Local client that only receives via Photon)
+            if (faceMeshReceiver == null)
+                faceMeshReceiver = GetComponent<LslFaceMeshReceiver>();
+            if (gazeReceiver == null)
+                gazeReceiver = GetComponent<LslGazeReceiver>();
+            
+            if (faceMeshReceiver != null)
+            {
+                faceMeshReceiver.enabled = false;
+                Debug.Log($"[PhotonFaceGazeTransmitter] Disabled LslFaceMeshReceiver on remote player instance (LOCAL/RECEIVER mode)");
+            }
+            if (gazeReceiver != null)
+            {
+                gazeReceiver.enabled = false;
+                Debug.Log($"[PhotonFaceGazeTransmitter] Disabled LslGazeReceiver on remote player instance (LOCAL/RECEIVER mode)");
+            }
+            
             if (showDebugLogs)
             {
                 Debug.Log($"PhotonFaceGazeTransmitter (LOCAL/RECEIVER mode) for player: {photonView.Owner?.NickName}");
