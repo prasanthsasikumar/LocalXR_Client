@@ -1,15 +1,13 @@
 using UnityEngine;
-using Photon.Pun;
-using Photon.Realtime;
+using System.Collections.Generic;
 
 /// <summary>
-/// Transmits face mesh and eye gaze data from remote client to local client using Photon.
+/// Transmits face mesh and eye gaze data using AlignmentNetworkHub (no PhotonView required)
 /// On REMOTE CLIENT: Attach LSL receivers to read and transmit data.
 /// On LOCAL CLIENT: Leave LSL receivers empty - this script will only receive data.
-/// The script automatically detects its role based on PhotonView.IsMine.
+/// This version uses AlignmentNetworkHub events instead of IPunObservable
 /// </summary>
-[RequireComponent(typeof(PhotonView))]
-public class PhotonFaceGazeTransmitter : MonoBehaviourPun, IPunObservable
+public class PhotonFaceGazeTransmitter : MonoBehaviour
 {
     [Header("LSL Component References (Remote Client Only)")]
     [Tooltip("Reference to the LslFaceMeshReceiver component - ONLY needed on remote client")]
@@ -21,7 +19,7 @@ public class PhotonFaceGazeTransmitter : MonoBehaviourPun, IPunObservable
     [Header("Transmission Settings")]
     [Tooltip("Send data every N frames to reduce network traffic (1 = every frame)")]
     [Range(1, 10)]
-    public int transmissionInterval = 1;
+    public int transmissionInterval = 3;
     
     [Tooltip("Enable face mesh data transmission")]
     public bool transmitFaceMesh = true;
@@ -40,15 +38,18 @@ public class PhotonFaceGazeTransmitter : MonoBehaviourPun, IPunObservable
     [Header("Debug")]
     public bool showDebugLogs = false;
 
-    // Network state for received data (for remote clients)
-    private Vector3[] receivedFaceLandmarks;
-    private Vector2 receivedGazePosition;
-    private float receivedPupilSize;
-    private bool hasReceivedFaceData = false;
-    private bool hasReceivedGazeData = false;
+    [Header("Identity (Required)")]
+    [Tooltip("Unique identifier for this player - must be set manually or via code")]
+    public int playerId = -1;  // Must be set to distinguish local vs remote
+
+    // Network state for received data from other players
+    private Dictionary<int, FaceGazeData> receivedPlayerData = new Dictionary<int, FaceGazeData>();
 
     // Transmission counter
     private int frameCounter = 0;
+    
+    // Local data cache
+    private FaceGazeData localData;
 
     // Key landmark indices to transmit (optimized subset of 68-point model)
     private readonly int[] keyLandmarkIndices = new int[]
@@ -70,27 +71,63 @@ public class PhotonFaceGazeTransmitter : MonoBehaviourPun, IPunObservable
         48, 54, 51, 57, 62, 66  // Mouth right, mouth left, upper lip top, lower lip bottom, upper lip inner, lower lip inner
     };
 
+    /// <summary>
+    /// Data structure for face and gaze information
+    /// </summary>
+    [System.Serializable]
+    public class FaceGazeData
+    {
+        public Vector3[] faceLandmarks;
+        public Vector2 gazePosition;
+        public float pupilSize;
+        public bool hasFaceData;
+        public bool hasGazeData;
+        public float lastUpdateTime;
+
+        public FaceGazeData()
+        {
+            faceLandmarks = new Vector3[20];  // Default size
+            gazePosition = Vector2.zero;
+            pupilSize = 0f;
+            hasFaceData = false;
+            hasGazeData = false;
+            lastUpdateTime = 0f;
+        }
+    }
+
     private void Awake()
     {
-        // Initialize received data arrays (always needed)
-        receivedFaceLandmarks = new Vector3[keyLandmarksCount];
-        receivedGazePosition = Vector2.zero;
-        receivedPupilSize = 0f;
+        // Initialize local data
+        localData = new FaceGazeData();
+        localData.faceLandmarks = new Vector3[keyLandmarksCount];
+
+        // Auto-set playerId if not set
+        if (playerId == -1)
+        {
+            playerId = Photon.Pun.PhotonNetwork.LocalPlayer?.ActorNumber ?? Random.Range(1000, 9999);
+            Debug.Log($"[FaceGazeTransmitter] Auto-assigned playerId: {playerId}");
+        }
     }
 
     private void Start()
     {
-        // Validate PhotonView
-        if (photonView == null)
-        {
-            Debug.LogError("PhotonFaceGazeTransmitter requires a PhotonView component!");
-            enabled = false;
-            return;
-        }
+        // Subscribe to AlignmentNetworkHub events
+        AlignmentNetworkHub.OnFaceLandmarksReceived += OnFaceLandmarksReceived;
+        AlignmentNetworkHub.OnGazeDataReceived += OnGazeDataReceived;
 
-        // Auto-find LSL receivers if this is the owner (remote client)
-        if (photonView.IsMine)
+        // Auto-find LSL receivers if not assigned
+        if (faceMeshReceiver == null)
+            faceMeshReceiver = GetComponent<LslFaceMeshReceiver>();
+        
+        if (gazeReceiver == null)
+            gazeReceiver = GetComponent<LslGazeReceiver>();
+        
+        // Determine role
+        bool isTransmitter = faceMeshReceiver != null || gazeReceiver != null;
+        
+        if (showDebugLogs)
         {
+<<<<<<< Updated upstream
             if (faceMeshReceiver == null)
                 faceMeshReceiver = GetComponent<LslFaceMeshReceiver>();
             
@@ -132,222 +169,223 @@ public class PhotonFaceGazeTransmitter : MonoBehaviourPun, IPunObservable
             {
                 Debug.Log($"PhotonFaceGazeTransmitter (LOCAL/RECEIVER mode) for player: {photonView.Owner?.NickName}");
             }
+=======
+            Debug.Log($"[FaceGazeTransmitter] Started with playerId={playerId}, Role: {(isTransmitter ? "TRANSMITTER" : "RECEIVER")}");
+            Debug.Log($"[FaceGazeTransmitter] Face: {faceMeshReceiver != null}, Gaze: {gazeReceiver != null}");
+>>>>>>> Stashed changes
         }
     }
 
     private void Update()
     {
-        // Only transmit if this is our PhotonView
-        if (!photonView.IsMine)
-        {
-            // Periodic info to confirm non-ownership when debugging
-            if (showDebugLogs && Time.frameCount % 180 == 0)
-            {
-                Debug.Log(
-                    $"[FaceGazeTx] Not owner -> no send. Owner={photonView.Owner?.NickName ?? "null"} LocalNick={PhotonNetwork.NickName} ViewID={photonView.ViewID}");
-            }
-            return;
-        }
-
         frameCounter++;
         
         // Throttle transmission based on interval
         if (frameCounter % transmissionInterval != 0)
             return;
 
-        // Diagnostic: evaluate send preconditions and log once per second if blocked
-        bool faceReady = transmitFaceMesh && faceMeshReceiver != null && faceMeshReceiver.IsConnected;
-        bool gazeReady = transmitGaze && gazeReceiver != null && gazeReceiver.IsConnected;
-        if (showDebugLogs && (!faceReady || !gazeReady) && Time.frameCount % 60 == 0)
-        {
-            if (!transmitFaceMesh) Debug.Log("[FaceGazeTx] Face transmit disabled.");
-            if (transmitFaceMesh && faceMeshReceiver == null) Debug.Log("[FaceGazeTx] Face receiver component missing.");
-            if (transmitFaceMesh && faceMeshReceiver != null && !faceMeshReceiver.IsConnected) Debug.Log("[FaceGazeTx] Face LSL not connected yet.");
-
-            if (!transmitGaze) Debug.Log("[FaceGazeTx] Gaze transmit disabled.");
-            if (transmitGaze && gazeReceiver == null) Debug.Log("[FaceGazeTx] Gaze receiver component missing.");
-            if (transmitGaze && gazeReceiver != null && !gazeReceiver.IsConnected) Debug.Log("[FaceGazeTx] Gaze LSL not connected yet.");
-        }
+        // Try to send data if we have LSL receivers
+        TryTransmitData();
     }
 
-    /// <summary>
-    /// Called by Photon to serialize/deserialize data over the network
-    /// </summary>
-    public void OnPhotonSerializeView(PhotonStream stream, PhotonMessageInfo info)
+    private void TryTransmitData()
     {
-        if (stream.IsWriting)
-        {
-            // We are sending data (this is the local player)
-            SendFaceGazeData(stream);
-        }
-        else
-        {
-            // We are receiving data (this is a remote player)
-            ReceiveFaceGazeData(stream);
-        }
-    }
+        bool sentFace = false;
+        bool sentGaze = false;
 
-    /// <summary>
-    /// Sends face mesh and gaze data to the network
-    /// </summary>
-    private void SendFaceGazeData(PhotonStream stream)
-    {
         // Send face mesh data
         if (transmitFaceMesh && faceMeshReceiver != null && faceMeshReceiver.IsConnected)
         {
-            stream.SendNext(true); // Face data available flag
-            
-            // Send key landmarks
-            for (int i = 0; i < keyLandmarksCount && i < keyLandmarkIndices.Length; i++)
+            Vector3[] landmarks = ExtractKeyLandmarks();
+            if (landmarks != null)
             {
-                int landmarkIndex = keyLandmarkIndices[i];
-                Vector3 landmark = faceMeshReceiver.GetLandmark(landmarkIndex);
+                AlignmentNetworkHub.BroadcastFaceLandmarks(landmarks);
+                sentFace = true;
                 
-                if (compressLandmarks)
-                {
-                    // Compress by reducing precision
-                    stream.SendNext(Mathf.Round(landmark.x * 1000f) / 1000f);
-                    stream.SendNext(Mathf.Round(landmark.y * 1000f) / 1000f);
-                    stream.SendNext(Mathf.Round(landmark.z * 1000f) / 1000f);
-                }
-                else
-                {
-                    stream.SendNext(landmark.x);
-                    stream.SendNext(landmark.y);
-                    stream.SendNext(landmark.z);
-                }
-            }
+                // Update local cache
+                localData.faceLandmarks = landmarks;
+                localData.hasFaceData = true;
+                localData.lastUpdateTime = Time.time;
 
-            if (showDebugLogs && Time.frameCount % 60 == 0)
-            {
-                Debug.Log($"Sending face mesh data: {keyLandmarksCount} landmarks");
-            }
-        }
-        else
-        {
-            stream.SendNext(false); // No face data available
-            if (showDebugLogs && Time.frameCount % 120 == 0)
-            {
-                Debug.Log("[FaceGazeTx] Skipping face send (disabled or not ready).");
+                if (showDebugLogs && Time.frameCount % 60 == 0)
+                {
+                    Debug.Log($"[FaceGazeTransmitter] Sent face landmarks: {landmarks.Length} points");
+                }
             }
         }
 
         // Send gaze data
         if (transmitGaze && gazeReceiver != null && gazeReceiver.IsConnected)
         {
-            stream.SendNext(true); // Gaze data available flag
-            
-            // Get actual gaze data from receiver
             Vector2 gazePos = gazeReceiver.GetGazePosition();
             float pupilSize = gazeReceiver.GetPupilSize();
             
-            stream.SendNext(gazePos.x);
-            stream.SendNext(gazePos.y);
-            stream.SendNext(pupilSize);
+            AlignmentNetworkHub.BroadcastGazeData(gazePos, pupilSize);
+            sentGaze = true;
+            
+            // Update local cache
+            localData.gazePosition = gazePos;
+            localData.pupilSize = pupilSize;
+            localData.hasGazeData = true;
+            localData.lastUpdateTime = Time.time;
 
             if (showDebugLogs && Time.frameCount % 60 == 0)
             {
-                Debug.Log($"Sending gaze data: pos={gazePos}, pupil={pupilSize}");
+                Debug.Log($"[FaceGazeTransmitter] Sent gaze data: {gazePos}, pupil={pupilSize}");
             }
         }
-        else
+
+        // Log diagnostics if enabled but not sending
+        if (showDebugLogs && !sentFace && !sentGaze && Time.frameCount % 180 == 0)
         {
-            stream.SendNext(false); // No gaze data available
-            if (showDebugLogs && Time.frameCount % 120 == 0)
-            {
-                Debug.Log("[FaceGazeTx] Skipping gaze send (disabled or not ready).");
-            }
+            if (!transmitFaceMesh) Debug.Log("[FaceGazeTransmitter] Face transmission disabled");
+            if (transmitFaceMesh && faceMeshReceiver == null) Debug.Log("[FaceGazeTransmitter] Face receiver missing");
+            if (transmitFaceMesh && faceMeshReceiver != null && !faceMeshReceiver.IsConnected) Debug.Log("[FaceGazeTransmitter] Face LSL not connected");
+
+            if (!transmitGaze) Debug.Log("[FaceGazeTransmitter] Gaze transmission disabled");
+            if (transmitGaze && gazeReceiver == null) Debug.Log("[FaceGazeTransmitter] Gaze receiver missing");
+            if (transmitGaze && gazeReceiver != null && !gazeReceiver.IsConnected) Debug.Log("[FaceGazeTransmitter] Gaze LSL not connected");
         }
     }
 
-    /// <summary>
-    /// Receives face mesh and gaze data from the network
-    /// </summary>
-    private void ReceiveFaceGazeData(PhotonStream stream)
+    private Vector3[] ExtractKeyLandmarks()
     {
-        // Receive face mesh data
-        hasReceivedFaceData = (bool)stream.ReceiveNext();
+        if (faceMeshReceiver == null || !faceMeshReceiver.IsConnected)
+            return null;
+
+        Vector3[] landmarks = new Vector3[keyLandmarksCount];
         
-        if (hasReceivedFaceData)
+        for (int i = 0; i < keyLandmarksCount && i < keyLandmarkIndices.Length; i++)
         {
-            for (int i = 0; i < keyLandmarksCount && i < keyLandmarkIndices.Length; i++)
+            int landmarkIndex = keyLandmarkIndices[i];
+            Vector3 landmark = faceMeshReceiver.GetLandmark(landmarkIndex);
+            
+            if (compressLandmarks)
             {
-                float x = (float)stream.ReceiveNext();
-                float y = (float)stream.ReceiveNext();
-                float z = (float)stream.ReceiveNext();
-                receivedFaceLandmarks[i] = new Vector3(x, y, z);
+                // Compress by reducing precision to 3 decimal places
+                landmark.x = Mathf.Round(landmark.x * 1000f) / 1000f;
+                landmark.y = Mathf.Round(landmark.y * 1000f) / 1000f;
+                landmark.z = Mathf.Round(landmark.z * 1000f) / 1000f;
             }
-
-            if (showDebugLogs && Time.frameCount % 60 == 0)
-            {
-                Debug.Log($"Received face mesh data: {keyLandmarksCount} landmarks from {photonView.Owner.NickName}");
-            }
+            
+            landmarks[i] = landmark;
         }
-
-        // Receive gaze data
-        hasReceivedGazeData = (bool)stream.ReceiveNext();
         
-        if (hasReceivedGazeData)
+        return landmarks;
+    }
+
+    #region AlignmentNetworkHub Event Handlers
+
+    private void OnFaceLandmarksReceived(int senderId, Vector3[] landmarks, bool hasData)
+    {
+        if (senderId == playerId) return; // Ignore our own data
+
+        // Ensure player data exists
+        if (!receivedPlayerData.ContainsKey(senderId))
         {
-            receivedGazePosition.x = (float)stream.ReceiveNext();
-            receivedGazePosition.y = (float)stream.ReceiveNext();
-            receivedPupilSize = (float)stream.ReceiveNext();
+            receivedPlayerData[senderId] = new FaceGazeData();
+        }
+
+        // Update face data
+        FaceGazeData playerData = receivedPlayerData[senderId];
+        playerData.hasFaceData = hasData;
+        playerData.lastUpdateTime = Time.time;
+
+        if (hasData && landmarks != null)
+        {
+            // Ensure array is right size
+            if (playerData.faceLandmarks.Length != landmarks.Length)
+            {
+                playerData.faceLandmarks = new Vector3[landmarks.Length];
+            }
+            
+            System.Array.Copy(landmarks, playerData.faceLandmarks, landmarks.Length);
 
             if (showDebugLogs && Time.frameCount % 60 == 0)
             {
-                Debug.Log($"Received gaze data: {receivedGazePosition} from {photonView.Owner.NickName}");
+                Debug.Log($"[FaceGazeTransmitter] Received face landmarks from Player {senderId}: {landmarks.Length} points");
             }
         }
     }
 
-    // Public accessors for received data (for other scripts to use)
-    
-    /// <summary>
-    /// Check if this PhotonView has received face mesh data
-    /// </summary>
-    public bool HasFaceData => hasReceivedFaceData;
-
-    /// <summary>
-    /// Check if this PhotonView has received gaze data
-    /// </summary>
-    public bool HasGazeData => hasReceivedGazeData;
-
-    /// <summary>
-    /// Get a specific landmark from the received face mesh data
-    /// </summary>
-    public Vector3 GetReceivedLandmark(int keyIndex)
+    private void OnGazeDataReceived(int senderId, Vector2 gazePosition, float pupilSize, bool hasData)
     {
-        if (keyIndex >= 0 && keyIndex < receivedFaceLandmarks.Length)
-            return receivedFaceLandmarks[keyIndex];
-        return Vector3.zero;
+        if (senderId == playerId) return; // Ignore our own data
+
+        // Ensure player data exists
+        if (!receivedPlayerData.ContainsKey(senderId))
+        {
+            receivedPlayerData[senderId] = new FaceGazeData();
+        }
+
+        // Update gaze data
+        FaceGazeData playerData = receivedPlayerData[senderId];
+        playerData.hasGazeData = hasData;
+        playerData.gazePosition = gazePosition;
+        playerData.pupilSize = pupilSize;
+        playerData.lastUpdateTime = Time.time;
+
+        if (showDebugLogs && Time.frameCount % 60 == 0)
+        {
+            Debug.Log($"[FaceGazeTransmitter] Received gaze data from Player {senderId}: {gazePosition}");
+        }
+    }
+
+    #endregion
+
+    #region Public API for accessing received data
+
+    /// <summary>
+    /// Get received face/gaze data for a specific player
+    /// </summary>
+    public FaceGazeData GetPlayerData(int targetPlayerId)
+    {
+        return receivedPlayerData.ContainsKey(targetPlayerId) ? receivedPlayerData[targetPlayerId] : null;
     }
 
     /// <summary>
-    /// Get the full array of received landmarks
+    /// Get all received player data
     /// </summary>
-    public Vector3[] GetReceivedLandmarks()
+    public Dictionary<int, FaceGazeData> GetAllPlayerData()
     {
-        return receivedFaceLandmarks;
+        return new Dictionary<int, FaceGazeData>(receivedPlayerData);
     }
 
     /// <summary>
-    /// Get the received gaze position (normalized screen coordinates)
+    /// Get our own local data (if we're transmitting)
     /// </summary>
-    public Vector2 GetReceivedGazePosition()
+    public FaceGazeData GetLocalData()
     {
-        return receivedGazePosition;
+        return localData;
     }
 
     /// <summary>
-    /// Get the received pupil size
+    /// Get list of all players we've received data from
     /// </summary>
-    public float GetReceivedPupilSize()
+    public int[] GetActivePlayerIds()
     {
-        return receivedPupilSize;
+        List<int> activeIds = new List<int>();
+        foreach (var kvp in receivedPlayerData)
+        {
+            if (Time.time - kvp.Value.lastUpdateTime < 5f) // Active within last 5 seconds
+            {
+                activeIds.Add(kvp.Key);
+            }
+        }
+        return activeIds.ToArray();
     }
 
     /// <summary>
-    /// Get the mapping of key landmark indices to the full 68-point model
+    /// Check if we have recent data from a specific player
+    /// </summary>
+    public bool HasRecentDataFrom(int targetPlayerId, float maxAge = 2f)
+    {
+        if (!receivedPlayerData.ContainsKey(targetPlayerId)) return false;
+        return Time.time - receivedPlayerData[targetPlayerId].lastUpdateTime < maxAge;
+    }
+
+    /// <summary>
+    /// Get the original landmark index from our key landmark index
     /// </summary>
     public int GetOriginalLandmarkIndex(int keyIndex)
     {
@@ -356,33 +394,50 @@ public class PhotonFaceGazeTransmitter : MonoBehaviourPun, IPunObservable
         return -1;
     }
 
+    #endregion
+
     private void OnGUI()
     {
         if (!showDebugLogs)
             return;
 
         // Display status in the corner of the screen
-        GUILayout.BeginArea(new Rect(10, 150, 400, 200));
+        GUILayout.BeginArea(new Rect(10, 150, 400, 300));
         GUILayout.BeginVertical("box");
         
-        GUILayout.Label($"<b>Photon Face/Gaze Transmitter</b>");
-        GUILayout.Label($"Is Mine: {photonView.IsMine}");
-        GUILayout.Label($"Owner: {photonView.Owner?.NickName ?? "None"}");
+        GUILayout.Label($"<b>Face/Gaze Transmitter (via AlignmentNetworkHub)</b>");
+        GUILayout.Label($"Player ID: {playerId}");
         
-        if (photonView.IsMine)
+        // Show transmission status
+        bool canTransmitFace = faceMeshReceiver != null && faceMeshReceiver.IsConnected;
+        bool canTransmitGaze = gazeReceiver != null && gazeReceiver.IsConnected;
+        
+        GUILayout.Label($"<b>Transmission:</b>");
+        GUILayout.Label($"  Face: {(canTransmitFace ? "✓ Active" : "✗ Inactive")}");
+        GUILayout.Label($"  Gaze: {(canTransmitGaze ? "✓ Active" : "✗ Inactive")}");
+        
+        // Show received data
+        GUILayout.Label($"<b>Receiving from {receivedPlayerData.Count} players:</b>");
+        foreach (var kvp in receivedPlayerData)
         {
-            GUILayout.Label($"<b>Sending:</b>");
-            GUILayout.Label($"  Face: {(faceMeshReceiver != null && faceMeshReceiver.IsConnected ? "✓" : "✗")}");
-            GUILayout.Label($"  Gaze: {(gazeReceiver != null && gazeReceiver.IsConnected ? "✓" : "✗")}");
+            int pid = kvp.Key;
+            FaceGazeData data = kvp.Value;
+            float age = Time.time - data.lastUpdateTime;
+            
+            GUILayout.Label($"  Player {pid}: Face={data.hasFaceData} Gaze={data.hasGazeData} (age: {age:F1}s)");
         }
-        else
-        {
-            GUILayout.Label($"<b>Receiving:</b>");
-            GUILayout.Label($"  Face: {(hasReceivedFaceData ? "✓" : "✗")}");
-            GUILayout.Label($"  Gaze: {(hasReceivedGazeData ? "✓" : "✗")}");
-        }
+        
+        // AlignmentNetworkHub status
+        GUILayout.Label($"<b>Network Hub Ready:</b> {AlignmentNetworkHub.IsReady}");
         
         GUILayout.EndVertical();
         GUILayout.EndArea();
+    }
+
+    private void OnDestroy()
+    {
+        // Unsubscribe from events
+        AlignmentNetworkHub.OnFaceLandmarksReceived -= OnFaceLandmarksReceived;
+        AlignmentNetworkHub.OnGazeDataReceived -= OnGazeDataReceived;
     }
 }

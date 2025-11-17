@@ -28,6 +28,17 @@ public class LocalClient : MonoBehaviourPunCallbacks
 
     void Start()
     {
+        // ★ CRITICAL: Ensure AlignmentNetworkHub exists
+        AlignmentNetworkHub hub = FindFirstObjectByType<AlignmentNetworkHub>();
+        if (hub == null)
+        {
+            Debug.LogWarning("[LocalClient] AlignmentNetworkHub not found in scene! Creating one...");
+            GameObject hubObj = new GameObject("AlignmentNetworkHub");
+            hub = hubObj.AddComponent<AlignmentNetworkHub>();
+            PhotonView pv = hubObj.AddComponent<PhotonView>();
+            Debug.Log("[LocalClient] ✓ AlignmentNetworkHub created with PhotonView");
+        }
+        
         // Find VR camera if not assigned
         if (isVRMode && vrCamera == null)
         {
@@ -59,6 +70,36 @@ public class LocalClient : MonoBehaviourPunCallbacks
         Debug.Log("LocalClient connected to Master!");
         // Join or create a room automatically
         PhotonNetwork.JoinOrCreateRoom("MeshVRRoom", new RoomOptions { MaxPlayers = 4 }, TypedLobby.Default);
+    }
+
+    public override void OnDisconnected(DisconnectCause cause)
+    {
+        Debug.LogError($"[LocalClient] Disconnected! Cause: {cause}");
+
+        // Retry on timeout errors (includes NameServer timeout, AppOutOfFocus, etc)
+        if (cause == DisconnectCause.ServerTimeout || 
+            cause == DisconnectCause.ClientTimeout ||
+            cause == DisconnectCause.ExceptionOnConnect ||
+            cause == DisconnectCause.DnsExceptionOnConnect ||
+            cause == DisconnectCause.Exception)
+        {
+            Debug.LogWarning($"[LocalClient] Connection error ({cause}). Retrying in 3 seconds...");
+            CancelInvoke(nameof(RetryConnection));  // Cancel any pending retry
+            Invoke(nameof(RetryConnection), 3f);
+        }
+    }
+
+    void RetryConnection()
+    {
+        if (!PhotonNetwork.IsConnected)
+        {
+            Debug.Log("[LocalClient] Retrying Photon connection...");
+            PhotonNetwork.ConnectUsingSettings();
+        }
+        else
+        {
+            Debug.Log("[LocalClient] Already connected, retry cancelled");
+        }
     }
 
     public override void OnJoinedRoom()
@@ -142,8 +183,22 @@ public class LocalClient : MonoBehaviourPunCallbacks
         }
     }
 
+    private float lastConnectionCheckTime = 0f;
+    private const float CONNECTION_CHECK_INTERVAL = 5f;
+
     void Update()
     {
+        // Monitor connection status periodically
+        if (Time.time - lastConnectionCheckTime > CONNECTION_CHECK_INTERVAL)
+        {
+            lastConnectionCheckTime = Time.time;
+            
+            if (!PhotonNetwork.IsConnected)
+            {
+                Debug.LogWarning("[LocalClient] Connection lost! Status: " + PhotonNetwork.NetworkClientState);
+            }
+        }
+
         // Only update if we instantiated our own player
         if (!instantiateOwnPlayer)
         {

@@ -1,18 +1,14 @@
 using UnityEngine;
-using Photon.Pun;
 
 /// <summary>
 /// Interactive tool for VR users to align the scanned mesh with the real world
 /// Use controllers or keyboard to move, rotate, and scale the mesh
 /// Once aligned, save the transformation for consistent alignment
 /// 
-/// NOTE: PhotonView Configuration:
-/// - This component uses RPC calls only (no continuous synchronization needed)
-/// - Add PhotonView component to this GameObject
-/// - Observed Components can be left EMPTY - that's correct!
-/// - We only send mesh alignment via RPC when user saves
+/// NOTE: This component no longer directly handles PhotonView or RPC calls.
+/// Instead, it uses AlignmentNetworkHub to broadcast mesh alignment updates.
 /// </summary>
-public class MeshAlignmentTool : MonoBehaviourPunCallbacks
+public class MeshAlignmentTool : MonoBehaviour
 {
     [Header("Mesh to Align")]
     public Transform scannedMesh;
@@ -70,6 +66,10 @@ public class MeshAlignmentTool : MonoBehaviourPunCallbacks
         originalRotation = scannedMesh.rotation;
         originalScale = scannedMesh.localScale;
         
+        // Subscribe to alignment network hub events for mesh alignment updates
+        AlignmentNetworkHub.OnMeshAlignmentReceived += HandleRemoteMeshAlignment;
+        AlignmentNetworkHub.OnMeshAlignmentModeChanged += HandleRemoteMeshAlignmentModeChanged;
+        
         // Try to load saved alignment
         LoadAlignment();
         
@@ -78,6 +78,47 @@ public class MeshAlignmentTool : MonoBehaviourPunCallbacks
         {
             EnableAlignmentMode();
         }
+    }
+
+    private void OnEnable()
+    {
+        // Re-subscribe when enabled
+        if (AlignmentNetworkHub.Instance != null)
+        {
+            AlignmentNetworkHub.OnMeshAlignmentReceived += HandleRemoteMeshAlignment;
+            AlignmentNetworkHub.OnMeshAlignmentModeChanged += HandleRemoteMeshAlignmentModeChanged;
+        }
+    }
+
+    private void OnDisable()
+    {
+        // Unsubscribe when disabled to prevent memory leaks
+        AlignmentNetworkHub.OnMeshAlignmentReceived -= HandleRemoteMeshAlignment;
+        AlignmentNetworkHub.OnMeshAlignmentModeChanged -= HandleRemoteMeshAlignmentModeChanged;
+    }
+
+    /// <summary>
+    /// Handle incoming mesh alignment updates from remote clients
+    /// </summary>
+    private void HandleRemoteMeshAlignment(Vector3 newPosition, Quaternion newRotation, Vector3 newScale)
+    {
+        if (scannedMesh != null)
+        {
+            scannedMesh.position = newPosition;
+            scannedMesh.rotation = newRotation;
+            scannedMesh.localScale = newScale;
+            
+            Debug.Log($"<color=cyan>Received mesh alignment update from remote user</color>");
+            Debug.Log($"Position: {newPosition}");
+        }
+    }
+
+    /// <summary>
+    /// Handle remote mesh alignment mode changes
+    /// </summary>
+    private void HandleRemoteMeshAlignmentModeChanged(bool isEnabled)
+    {
+        Debug.Log($"Remote user {(isEnabled ? "entered" : "exited")} mesh alignment mode");
     }
 
     void Update()
@@ -256,11 +297,8 @@ public class MeshAlignmentTool : MonoBehaviourPunCallbacks
             CreateSimpleGrid();
         }
         
-        // Broadcast to other clients that we're in alignment mode
-        if (PhotonNetwork.InRoom)
-        {
-            photonView.RPC("OnAlignmentModeChanged", RpcTarget.Others, true);
-        }
+        // Broadcast to other clients via AlignmentNetworkHub
+        AlignmentNetworkHub.BroadcastMeshAlignmentModeChanged(true);
     }
 
     public void DisableAlignmentMode()
@@ -273,11 +311,8 @@ public class MeshAlignmentTool : MonoBehaviourPunCallbacks
             Destroy(alignmentGrid);
         }
         
-        // Broadcast to other clients
-        if (PhotonNetwork.InRoom)
-        {
-            photonView.RPC("OnAlignmentModeChanged", RpcTarget.Others, false);
-        }
+        // Broadcast to other clients via AlignmentNetworkHub
+        AlignmentNetworkHub.BroadcastMeshAlignmentModeChanged(false);
     }
 
     public void ToggleAlignmentMode()
@@ -286,12 +321,6 @@ public class MeshAlignmentTool : MonoBehaviourPunCallbacks
             DisableAlignmentMode();
         else
             EnableAlignmentMode();
-    }
-
-    [PunRPC]
-    void OnAlignmentModeChanged(bool isEnabled)
-    {
-        Debug.Log($"Remote user {(isEnabled ? "entered" : "exited")} alignment mode");
     }
 
     public void SaveAlignment()
@@ -321,14 +350,8 @@ public class MeshAlignmentTool : MonoBehaviourPunCallbacks
         Debug.Log($"Rotation: {savedRotation.eulerAngles}");
         Debug.Log($"Scale: {savedScale}");
         
-        // Broadcast the new alignment to other clients
-        if (PhotonNetwork.InRoom)
-        {
-            photonView.RPC("ReceiveMeshAlignment", RpcTarget.Others,
-                savedPosition.x, savedPosition.y, savedPosition.z,
-                savedRotation.x, savedRotation.y, savedRotation.z, savedRotation.w,
-                savedScale.x, savedScale.y, savedScale.z);
-        }
+        // Broadcast the new alignment to other clients via AlignmentNetworkHub
+        AlignmentNetworkHub.BroadcastMeshAlignment(savedPosition, savedRotation, savedScale);
     }
 
     public void LoadAlignment()
@@ -365,24 +388,6 @@ public class MeshAlignmentTool : MonoBehaviourPunCallbacks
         else
         {
             Debug.Log("<color=yellow>No saved alignment found. Using default position.</color>");
-        }
-    }
-
-    [PunRPC]
-    void ReceiveMeshAlignment(float px, float py, float pz, float rx, float ry, float rz, float rw, float sx, float sy, float sz)
-    {
-        Vector3 newPosition = new Vector3(px, py, pz);
-        Quaternion newRotation = new Quaternion(rx, ry, rz, rw);
-        Vector3 newScale = new Vector3(sx, sy, sz);
-        
-        if (scannedMesh != null)
-        {
-            scannedMesh.position = newPosition;
-            scannedMesh.rotation = newRotation;
-            scannedMesh.localScale = newScale;
-            
-            Debug.Log($"<color=cyan>Received mesh alignment update from VR user</color>");
-            Debug.Log($"Position: {newPosition}");
         }
     }
 
@@ -497,5 +502,9 @@ public class MeshAlignmentTool : MonoBehaviourPunCallbacks
         {
             Destroy(alignmentGrid);
         }
+        
+        // Unsubscribe from events when destroyed
+        AlignmentNetworkHub.OnMeshAlignmentReceived -= HandleRemoteMeshAlignment;
+        AlignmentNetworkHub.OnMeshAlignmentModeChanged -= HandleRemoteMeshAlignmentModeChanged;
     }
 }

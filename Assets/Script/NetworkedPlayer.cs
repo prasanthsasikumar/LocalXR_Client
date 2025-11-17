@@ -6,7 +6,15 @@ public class NetworkedPlayer : MonoBehaviourPun, IPunObservable
     private Vector3 networkPosition;
     private Quaternion networkRotation;
     
-    public float smoothSpeed = 10f;
+    // ★ Cached transformed values (prevent repeated transformations)
+    private Vector3 cachedTargetPosition;
+    private Quaternion cachedTargetRotation;
+    private bool hasValidCache = false;
+    
+    // ★ Fixed interpolation speeds (no frame-dependent calculations)
+    private const float POSITION_INTERPOLATION_SPEED = 0.2f;  // 20% per frame
+    private const float ROTATION_INTERPOLATION_SPEED = 0.25f;  // 25% per frame
+    
     public Material localPlayerMaterial;
     public Material remotePlayerMaterial;
     
@@ -51,19 +59,45 @@ public class NetworkedPlayer : MonoBehaviourPun, IPunObservable
     {
         if (!photonView.IsMine)
         {
-            // Apply spatial alignment for remote players
+            // Use cached target values (not recalculating every frame)
             Vector3 targetPosition = networkPosition;
             Quaternion targetRotation = networkRotation;
             
-            if (alignmentManager != null && alignmentManager.IsAligned())
+            // ★ Only transform if we haven't cached yet OR values changed
+            if (!hasValidCache || 
+                networkPosition != cachedTargetPosition || 
+                networkRotation != cachedTargetRotation)
             {
-                targetPosition = alignmentManager.TransformFromPlayer(photonView.Owner.ActorNumber, networkPosition);
-                targetRotation = alignmentManager.TransformFromPlayer(photonView.Owner.ActorNumber, networkRotation);
+                if (alignmentManager != null && alignmentManager.IsAligned())
+                {
+                    // Transform and cache (only when needed)
+                    cachedTargetPosition = alignmentManager.TransformFromPlayer(photonView.Owner.ActorNumber, networkPosition);
+                    cachedTargetRotation = alignmentManager.TransformFromPlayer(photonView.Owner.ActorNumber, networkRotation);
+                }
+                else
+                {
+                    cachedTargetPosition = networkPosition;
+                    cachedTargetRotation = networkRotation;
+                }
+                hasValidCache = true;
             }
             
-            // Smoothly interpolate to the aligned position for remote players
-            transform.position = Vector3.Lerp(transform.position, targetPosition, Time.deltaTime * smoothSpeed);
-            transform.rotation = Quaternion.Lerp(transform.rotation, targetRotation, Time.deltaTime * smoothSpeed);
+            targetPosition = cachedTargetPosition;
+            targetRotation = cachedTargetRotation;
+            
+            // ★ Fixed interpolation speeds (NOT frame-dependent)
+            // This provides smooth, predictable motion without frame-rate sensitivity
+            transform.position = Vector3.Lerp(
+                transform.position,
+                targetPosition,
+                POSITION_INTERPOLATION_SPEED
+            );
+            
+            transform.rotation = Quaternion.Slerp(
+                transform.rotation,
+                targetRotation,
+                ROTATION_INTERPOLATION_SPEED
+            );
         }
     }
 
@@ -78,8 +112,16 @@ public class NetworkedPlayer : MonoBehaviourPun, IPunObservable
         else
         {
             // Receive position and rotation from owner
-            networkPosition = (Vector3)stream.ReceiveNext();
-            networkRotation = (Quaternion)stream.ReceiveNext();
+            Vector3 newPosition = (Vector3)stream.ReceiveNext();
+            Quaternion newRotation = (Quaternion)stream.ReceiveNext();
+            
+            // ★ Invalidate cache when new data arrives
+            if (newPosition != networkPosition || newRotation != networkRotation)
+            {
+                networkPosition = newPosition;
+                networkRotation = newRotation;
+                hasValidCache = false;  // Recalculate transformation on next Update()
+            }
         }
     }
 

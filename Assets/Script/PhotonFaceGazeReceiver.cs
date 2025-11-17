@@ -2,15 +2,15 @@ using UnityEngine;
 using Photon.Pun;
 
 /// <summary>
-/// Receives and visualizes face mesh and eye gaze data from remote clients via Photon.
+/// Receives and visualizes face mesh and eye gaze data from remote clients via AlignmentNetworkHub.
 /// Attach this script to a GameObject that represents a remote player.
-/// It will automatically find and use the PhotonFaceGazeTransmitter component on the same object.
+/// Uses AlignmentNetworkHub events instead of direct PhotonView dependency.
 /// </summary>
 public class PhotonFaceGazeReceiver : MonoBehaviour
 {
-    [Header("Component References")]
-    [Tooltip("Reference to the PhotonFaceGazeTransmitter component")]
-    public PhotonFaceGazeTransmitter transmitter;
+    [Header("Player Identification")]
+    [Tooltip("Remote player ID to receive data from")]
+    public int targetPlayerId = -1;
 
     [Header("Face Mesh Visualization")]
     [Tooltip("Prefab or GameObject to instantiate for each landmark")]
@@ -45,18 +45,32 @@ public class PhotonFaceGazeReceiver : MonoBehaviour
     private GameObject[] landmarkObjects;
     private PhotonView photonView;
     private bool isInitialized = false;
+    
+    // Received data cache (from AlignmentNetworkHub events)
+    private Vector3[] receivedFaceLandmarks;
+    private Vector2 receivedGazePosition;
+    private float receivedPupilSize;
+    private bool hasFaceData = false;
+    private bool hasGazeData = false;
+    private float lastFaceDataTime = 0f;
+    private float lastGazeDataTime = 0f;
 
     private void Awake()
     {
-        // Auto-find transmitter if not assigned
-        if (transmitter == null)
-            transmitter = GetComponent<PhotonFaceGazeTransmitter>();
-        
         photonView = GetComponent<PhotonView>();
+        
+        // Auto-assign target player ID from PhotonView if available
+        if (targetPlayerId == -1 && photonView != null && photonView.Owner != null)
+        {
+            targetPlayerId = photonView.Owner.ActorNumber;
+        }
         
         // Setup camera reference
         if (targetCamera == null)
             targetCamera = Camera.main;
+        
+        // Initialize received data arrays
+        receivedFaceLandmarks = new Vector3[20]; // Default size, will resize as needed
     }
 
     private void Start()
@@ -64,19 +78,23 @@ public class PhotonFaceGazeReceiver : MonoBehaviour
         // Only visualize for remote players (not our own)
         if (photonView != null && photonView.IsMine)
         {
+            if (showDebugInfo)
+                Debug.Log("[FaceGazeRx] Disabled - this is our own player");
             enabled = false;
             return;
         }
+
+        // Subscribe to AlignmentNetworkHub events
+        AlignmentNetworkHub.OnFaceLandmarksReceived += OnFaceLandmarksReceived;
+        AlignmentNetworkHub.OnGazeDataReceived += OnGazeDataReceived;
 
         InitializeLandmarkVisualization();
         InitializeGazeVisualization();
         
         isInitialized = true;
         
-        // Diagnostic: log receiver setup state
-        string ownerName = photonView?.Owner?.NickName ?? "null";
-        bool hasTransmitter = transmitter != null;
-        Debug.Log($"[FaceGazeRx] Initialized for remote player '{ownerName}' | ViewID={photonView?.ViewID} | Transmitter={hasTransmitter}");
+        string ownerName = photonView?.Owner?.NickName ?? "Unknown";
+        Debug.Log($"[FaceGazeRx] Initialized for remote player '{ownerName}' | PlayerID={targetPlayerId} | ViewID={photonView?.ViewID}");
     }
 
     private void InitializeLandmarkVisualization()
@@ -98,19 +116,16 @@ public class PhotonFaceGazeReceiver : MonoBehaviour
             landmarkParent = parentObj.transform;
         }
 
-        // Create landmark visualization objects
-        if (transmitter != null)
+        // Create landmark visualization objects (default 20 landmarks)
+        int landmarkCount = 20;
+        landmarkObjects = new GameObject[landmarkCount];
+        
+        for (int i = 0; i < landmarkCount; i++)
         {
-            int landmarkCount = transmitter.keyLandmarksCount;
-            landmarkObjects = new GameObject[landmarkCount];
-            
-            for (int i = 0; i < landmarkCount; i++)
-            {
-                GameObject landmark = Instantiate(landmarkPrefab, landmarkParent);
-                landmark.name = $"Landmark_{i}";
-                landmark.SetActive(false); // Hide until data is received
-                landmarkObjects[i] = landmark;
-            }
+            GameObject landmark = Instantiate(landmarkPrefab, landmarkParent);
+            landmark.name = $"Landmark_{i}";
+            landmark.SetActive(false); // Hide until data is received
+            landmarkObjects[i] = landmark;
         }
     }
 
@@ -136,38 +151,120 @@ public class PhotonFaceGazeReceiver : MonoBehaviour
 
     private void Update()
     {
-        if (!isInitialized || transmitter == null)
+        if (!isInitialized)
             return;
 
         // Periodic diagnostic: check if we're receiving any data
         if (showDebugInfo && Time.frameCount % 180 == 0)
         {
-            string ownerName = photonView?.Owner?.NickName ?? "null";
-            Debug.Log($"[FaceGazeRx] Status | Owner={ownerName} | HasFaceData={transmitter.HasFaceData} | HasGazeData={transmitter.HasGazeData}");
+            string ownerName = photonView?.Owner?.NickName ?? "Unknown";
+            float faceAge = Time.time - lastFaceDataTime;
+            float gazeAge = Time.time - lastGazeDataTime;
+            Debug.Log($"[FaceGazeRx] Status | Player={ownerName} | PlayerID={targetPlayerId} | Face={hasFaceData}(age:{faceAge:F1}s) | Gaze={hasGazeData}(age:{gazeAge:F1}s)");
         }
 
         UpdateFaceMeshVisualization();
         UpdateGazeVisualization();
     }
 
+    #region AlignmentNetworkHub Event Handlers
+
+    private void OnFaceLandmarksReceived(int senderId, Vector3[] landmarks, bool hasData)
+    {
+        // Only process data from our target player
+        if (senderId != targetPlayerId)
+            return;
+
+        hasFaceData = hasData;
+        lastFaceDataTime = Time.time;
+
+        if (hasData && landmarks != null)
+        {
+            // Resize array if needed
+            if (receivedFaceLandmarks.Length != landmarks.Length)
+            {
+                receivedFaceLandmarks = new Vector3[landmarks.Length];
+                
+                // Resize landmark objects array if needed
+                if (landmarkObjects == null || landmarkObjects.Length != landmarks.Length)
+                {
+                    ResizeLandmarkObjects(landmarks.Length);
+                }
+            }
+
+            System.Array.Copy(landmarks, receivedFaceLandmarks, landmarks.Length);
+
+            if (showDebugInfo && Time.frameCount % 60 == 0)
+            {
+                Debug.Log($"[FaceGazeRx] Received {landmarks.Length} face landmarks from Player {senderId}");
+            }
+        }
+    }
+
+    private void OnGazeDataReceived(int senderId, Vector2 gazePosition, float pupilSize, bool hasData)
+    {
+        // Only process data from our target player
+        if (senderId != targetPlayerId)
+            return;
+
+        hasGazeData = hasData;
+        lastGazeDataTime = Time.time;
+
+        if (hasData)
+        {
+            receivedGazePosition = gazePosition;
+            receivedPupilSize = pupilSize;
+
+            if (showDebugInfo && Time.frameCount % 60 == 0)
+            {
+                Debug.Log($"[FaceGazeRx] Received gaze data from Player {senderId}: {gazePosition}");
+            }
+        }
+    }
+
+    private void ResizeLandmarkObjects(int newSize)
+    {
+        // Clean up old objects
+        if (landmarkObjects != null)
+        {
+            foreach (var obj in landmarkObjects)
+            {
+                if (obj != null)
+                    Destroy(obj);
+            }
+        }
+
+        // Create new objects
+        landmarkObjects = new GameObject[newSize];
+        for (int i = 0; i < newSize; i++)
+        {
+            GameObject landmark = Instantiate(landmarkPrefab, landmarkParent);
+            landmark.name = $"Landmark_{i}";
+            landmark.SetActive(false);
+            landmarkObjects[i] = landmark;
+        }
+
+        Debug.Log($"[FaceGazeRx] Resized landmark objects to {newSize}");
+    }
+
+    #endregion
+
     private void UpdateFaceMeshVisualization()
     {
-        if (!transmitter.HasFaceData || landmarkObjects == null)
+        if (!hasFaceData || landmarkObjects == null)
         {
             if (showDebugInfo && Time.frameCount % 300 == 0 && landmarkObjects != null)
             {
-                Debug.Log("[FaceGazeRx] No face data received yet from transmitter.");
+                Debug.Log($"[FaceGazeRx] No face data from Player {targetPlayerId} yet.");
             }
             return;
         }
 
-        Vector3[] landmarks = transmitter.GetReceivedLandmarks();
-        
-        for (int i = 0; i < landmarkObjects.Length && i < landmarks.Length; i++)
+        for (int i = 0; i < landmarkObjects.Length && i < receivedFaceLandmarks.Length; i++)
         {
             if (landmarkObjects[i] != null)
             {
-                Vector3 position = landmarks[i];
+                Vector3 position = receivedFaceLandmarks[i];
                 
                 // Check if landmark data is valid
                 if (position != Vector3.zero)
@@ -186,29 +283,28 @@ public class PhotonFaceGazeReceiver : MonoBehaviour
 
         if (showDebugInfo && Time.frameCount % 60 == 0)
         {
-            Debug.Log($"Visualizing {landmarks.Length} face landmarks from {photonView?.Owner?.NickName}");
+            Debug.Log($"[FaceGazeRx] Visualizing {receivedFaceLandmarks.Length} landmarks from Player {targetPlayerId}");
         }
     }
 
     private void UpdateGazeVisualization()
     {
-        if (!transmitter.HasGazeData || gazeIndicator == null || targetCamera == null)
+        if (!hasGazeData || gazeIndicator == null || targetCamera == null)
         {
             if (gazeIndicator != null)
                 gazeIndicator.SetActive(false);
             
             if (showDebugInfo && Time.frameCount % 300 == 0 && gazeIndicator != null && targetCamera != null)
             {
-                Debug.Log("[FaceGazeRx] No gaze data received yet from transmitter.");
+                Debug.Log($"[FaceGazeRx] No gaze data from Player {targetPlayerId} yet.");
             }
             return;
         }
 
-        Vector2 gazePos = transmitter.GetReceivedGazePosition();
-        
         // Validate gaze position
-        if (float.IsNaN(gazePos.x) || float.IsNaN(gazePos.y) || 
-            gazePos.x < 0 || gazePos.x > 1 || gazePos.y < 0 || gazePos.y > 1)
+        if (float.IsNaN(receivedGazePosition.x) || float.IsNaN(receivedGazePosition.y) || 
+            receivedGazePosition.x < 0 || receivedGazePosition.x > 1 || 
+            receivedGazePosition.y < 0 || receivedGazePosition.y > 1)
         {
             gazeIndicator.SetActive(false);
             return;
@@ -216,8 +312,8 @@ public class PhotonFaceGazeReceiver : MonoBehaviour
 
         // Convert normalized screen coordinates to world position via raycast
         Vector3 screenPos = new Vector3(
-            gazePos.x * Screen.width,
-            gazePos.y * Screen.height,
+            receivedGazePosition.x * Screen.width,
+            receivedGazePosition.y * Screen.height,
             0f
         );
 
@@ -248,28 +344,40 @@ public class PhotonFaceGazeReceiver : MonoBehaviour
 
         if (showDebugInfo && Time.frameCount % 60 == 0)
         {
-            Debug.Log($"Visualizing gaze at {gazePos} from {photonView?.Owner?.NickName}");
+            Debug.Log($"[FaceGazeRx] Visualizing gaze at {receivedGazePosition} from Player {targetPlayerId}");
         }
     }
 
     private void OnGUI()
     {
-        if (!showDebugInfo || transmitter == null)
+        if (!showDebugInfo)
             return;
 
-        GUILayout.BeginArea(new Rect(420, 150, 400, 200));
+        GUILayout.BeginArea(new Rect(420, 150, 400, 250));
         GUILayout.BeginVertical("box");
         
-        GUILayout.Label($"<b>Photon Face/Gaze Receiver</b>");
+        GUILayout.Label($"<b>Face/Gaze Receiver (AlignmentNetworkHub)</b>");
         GUILayout.Label($"Remote Player: {photonView?.Owner?.NickName ?? "Unknown"}");
-        GUILayout.Label($"Has Face Data: {transmitter.HasFaceData}");
-        GUILayout.Label($"Has Gaze Data: {transmitter.HasGazeData}");
+        GUILayout.Label($"Target Player ID: {targetPlayerId}");
+        GUILayout.Label($"Has Face Data: {hasFaceData}");
+        GUILayout.Label($"Has Gaze Data: {hasGazeData}");
         
-        if (transmitter.HasGazeData)
+        if (hasFaceData)
         {
-            Vector2 gazePos = transmitter.GetReceivedGazePosition();
-            GUILayout.Label($"Gaze Pos: ({gazePos.x:F3}, {gazePos.y:F3})");
+            float faceAge = Time.time - lastFaceDataTime;
+            GUILayout.Label($"Face Data Age: {faceAge:F1}s");
+            GUILayout.Label($"Landmarks: {receivedFaceLandmarks.Length}");
         }
+        
+        if (hasGazeData)
+        {
+            float gazeAge = Time.time - lastGazeDataTime;
+            GUILayout.Label($"Gaze Pos: ({receivedGazePosition.x:F3}, {receivedGazePosition.y:F3})");
+            GUILayout.Label($"Gaze Data Age: {gazeAge:F1}s");
+            GUILayout.Label($"Pupil Size: {receivedPupilSize:F3}");
+        }
+        
+        GUILayout.Label($"Hub Ready: {AlignmentNetworkHub.IsReady}");
         
         GUILayout.EndVertical();
         GUILayout.EndArea();
@@ -277,6 +385,10 @@ public class PhotonFaceGazeReceiver : MonoBehaviour
 
     private void OnDestroy()
     {
+        // Unsubscribe from AlignmentNetworkHub events
+        AlignmentNetworkHub.OnFaceLandmarksReceived -= OnFaceLandmarksReceived;
+        AlignmentNetworkHub.OnGazeDataReceived -= OnGazeDataReceived;
+
         // Clean up landmark objects
         if (landmarkObjects != null)
         {

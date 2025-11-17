@@ -228,6 +228,5 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 67ba9a46d5d0ba542aff214934a61cdc, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::NetworkedPlayer
-  smoothSpeed: 10
   localPlayerMaterial: {fileID: 0}
   remotePlayerMaterial: {fileID: 0}
