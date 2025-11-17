@@ -6,8 +6,12 @@ using System.Collections.Generic;
 /// <summary>
 /// Handles spatial alignment between different coordinate systems
 /// Use this to align VR headset coordinates with desktop/laptop coordinates
+/// 
+/// NOTE: This component no longer directly handles PhotonView or RPC calls.
+/// Instead, it subscribes to AlignmentNetworkHub events and uses AlignmentMath
+/// for coordinate transformations.
 /// </summary>
-public class SpatialAlignmentManager : MonoBehaviourPunCallbacks
+public class SpatialAlignmentManager : MonoBehaviour
 {
     [Header("Alignment Settings")]
     [Tooltip("The shared mesh reference point in the scene")]
@@ -64,64 +68,83 @@ public class SpatialAlignmentManager : MonoBehaviourPunCallbacks
             GameObject refObj = new GameObject("MeshReferencePoint");
             meshReferencePoint = refObj.transform;
         }
+        
+        // Subscribe to alignment network hub events
+        AlignmentNetworkHub.OnSpatialAlignmentReceived += HandleRemoteSpatialAlignment;
     }
 
-    public override void OnJoinedRoom()
+    private void OnEnable()
     {
-        base.OnJoinedRoom();
-        
-        // Share our mesh origin with other players
-        if (alignmentMode != AlignmentMode.SharedOrigin)
+        // Re-subscribe when enabled (in case object was disabled)
+        if (AlignmentNetworkHub.Instance != null)
         {
+            AlignmentNetworkHub.OnSpatialAlignmentReceived += HandleRemoteSpatialAlignment;
+        }
+    }
+
+    private void OnDisable()
+    {
+        // Unsubscribe when disabled to prevent memory leaks
+        AlignmentNetworkHub.OnSpatialAlignmentReceived -= HandleRemoteSpatialAlignment;
+    }
+
+    void Update()
+    {
+        // Check if we just joined the room and haven't initiated alignment yet
+        if (PhotonNetwork.InRoom && !isAligned && alignmentMode != AlignmentMode.SharedOrigin && !_alignmentInitiated)
+        {
+            _alignmentInitiated = true;
             StartCoroutine(InitiateAlignment());
         }
     }
+
+    private bool _alignmentInitiated = false;
 
     System.Collections.IEnumerator InitiateAlignment()
     {
         yield return new WaitForSeconds(1f); // Wait for all players to join
         
-        // Send our mesh reference position to other players
+        // Send our mesh reference position to other players via AlignmentNetworkHub
         Vector3 myMeshOrigin = meshReferencePoint.position;
         Quaternion myMeshRotation = meshReferencePoint.rotation;
         
-        photonView.RPC("ReceiveAlignmentData", RpcTarget.AllBuffered, 
-            PhotonNetwork.LocalPlayer.ActorNumber,
-            myMeshOrigin.x, myMeshOrigin.y, myMeshOrigin.z,
-            myMeshRotation.x, myMeshRotation.y, myMeshRotation.z, myMeshRotation.w);
+        AlignmentNetworkHub.BroadcastSpatialReference(myMeshOrigin, myMeshRotation);
         
         Debug.Log($"<color=cyan>Sent alignment data: Origin at {myMeshOrigin}</color>");
     }
 
-    [PunRPC]
-    void ReceiveAlignmentData(int playerId, float px, float py, float pz, float rx, float ry, float rz, float rw)
+    /// <summary>
+    /// Handle incoming spatial alignment data from remote clients
+    /// </summary>
+    private void HandleRemoteSpatialAlignment(int playerId, Vector3 remoteOrigin, Quaternion remoteRotation)
     {
-        Vector3 remoteOrigin = new Vector3(px, py, pz);
-        Quaternion remoteRotation = new Quaternion(rx, ry, rz, rw);
-        
-        if (playerId != PhotonNetwork.LocalPlayer.ActorNumber)
+        if (playerId == Photon.Pun.PhotonNetwork.LocalPlayer.ActorNumber)
         {
-            Debug.Log($"<color=green>Received alignment from Player {playerId}: Origin at {remoteOrigin}</color>");
-            
-            // Calculate offset between our mesh and their mesh
-            AlignmentData alignment = new AlignmentData(playerId);
-            alignment.meshOrigin = remoteOrigin;
-            alignment.positionOffset = meshReferencePoint.position - remoteOrigin;
-            alignment.rotationOffset = Quaternion.Inverse(remoteRotation) * meshReferencePoint.rotation;
-            
-            playerAlignments[playerId] = alignment;
-            
-            if (showDebugInfo)
-            {
-                CreateDebugMarker(remoteOrigin, playerId);
-            }
-            
-            isAligned = true;
+            // Ignore our own data
+            return;
         }
+        
+        Debug.Log($"<color=green>Received alignment from Player {playerId}: Origin at {remoteOrigin}</color>");
+        
+        // Calculate alignment using AlignmentMath
+        AlignmentData alignment = new AlignmentData(playerId);
+        alignment.meshOrigin = remoteOrigin;
+        alignment.positionOffset = AlignmentMath.ComputePositionOffset(meshReferencePoint.position, remoteOrigin);
+        alignment.rotationOffset = AlignmentMath.ComputeRotationOffset(meshReferencePoint.rotation, remoteRotation);
+        
+        playerAlignments[playerId] = alignment;
+        
+        if (showDebugInfo)
+        {
+            CreateDebugMarker(remoteOrigin, playerId);
+        }
+        
+        isAligned = true;
     }
 
     /// <summary>
     /// Transform a position from another player's coordinate system to ours
+    /// Uses AlignmentMath for mathematically rigorous coordinate transformation
     /// </summary>
     public Vector3 TransformFromPlayer(int playerId, Vector3 theirPosition)
     {
@@ -129,13 +152,24 @@ public class SpatialAlignmentManager : MonoBehaviourPunCallbacks
             return theirPosition;
 
         if (alignmentMode == AlignmentMode.ManualAlign)
-            return theirPosition + positionOffset;
-
+            return AlignmentMath.TransformPositionToLocal(
+                theirPosition,
+                Vector3.zero,  // Remote origin at 0,0,0
+                Quaternion.identity,  // Remote rotation identity
+                Vector3.zero,  // Local origin at 0,0,0
+                Quaternion.identity,  // Local rotation identity
+                1f);  // No scale
+                
         if (playerAlignments.TryGetValue(playerId, out AlignmentData alignment))
         {
-            // Transform their position to our coordinate system
-            Vector3 transformed = theirPosition + alignment.positionOffset;
-            return transformed;
+            // Use AlignmentMath for consistent transformation
+            return AlignmentMath.TransformPositionToLocal(
+                theirPosition,
+                alignment.meshOrigin,  // Remote mesh origin
+                Quaternion.identity,  // Remote reference rotation (identity)
+                meshReferencePoint.position,  // Local mesh origin
+                meshReferencePoint.rotation,  // Local mesh rotation
+                scaleMultiplier);
         }
 
         return theirPosition; // No alignment data, return as-is
@@ -143,6 +177,7 @@ public class SpatialAlignmentManager : MonoBehaviourPunCallbacks
 
     /// <summary>
     /// Transform a rotation from another player's coordinate system to ours
+    /// Uses AlignmentMath for mathematically rigorous coordinate transformation
     /// </summary>
     public Quaternion TransformFromPlayer(int playerId, Quaternion theirRotation)
     {
@@ -150,11 +185,20 @@ public class SpatialAlignmentManager : MonoBehaviourPunCallbacks
             return theirRotation;
 
         if (alignmentMode == AlignmentMode.ManualAlign)
-            return theirRotation * Quaternion.Euler(rotationOffset);
+            return AlignmentMath.TransformRotationToLocal(
+                theirRotation,
+                Quaternion.identity,  // Remote reference rotation
+                Quaternion.identity);  // Local reference rotation
 
         if (playerAlignments.TryGetValue(playerId, out AlignmentData alignment))
         {
-            return alignment.rotationOffset * theirRotation;
+            Quaternion transformedRotation = AlignmentMath.TransformRotationToLocal(
+                theirRotation,
+                Quaternion.identity,  // Remote reference rotation (fixed: identity)
+                meshReferencePoint.rotation);  // Local mesh rotation
+            
+            // ★ Normalize quaternion to prevent drift
+            return transformedRotation.normalized;
         }
 
         return theirRotation;
