@@ -1,6 +1,8 @@
 using UnityEngine;
 using UnityEngine.XR;
 using Photon.Pun;
+using Photon.Realtime;
+using ExitGames.Client.Photon;
 
 /// <summary>
 /// Manages spatial mesh alignment for VR controllers.
@@ -30,6 +32,25 @@ public class MeshAlignmentManager : MonoBehaviourPunCallbacks
     
     [Header("Persistence")]
     public string saveKey = "MeshAlignment_";
+    [Tooltip("If true, apply saved alignment automatically on Start. Disable to prevent PlayerPrefs from moving the mesh at launch.")]
+    public bool autoLoadAlignment = false;
+    [Tooltip("If true, Save/Load will use Unity PlayerPrefs. Disable to avoid reading/writing local preferences.(Default: false)")]
+    public bool persistToPlayerPrefs = false;
+    [Header("Networking")]
+    [Tooltip("If true, send mesh transform updates in real time to other Photon clients while adjusting.")]
+    public bool broadcastRealtime = false;
+    [Tooltip("Minimum time (seconds) between real-time broadcasts.")]
+    public float broadcastInterval = 0.1f;
+    [Tooltip("Position/scale change threshold (meters) that triggers a broadcast when exceeded.")]
+    public float positionThreshold = 0.001f;
+    [Tooltip("Rotation change threshold (degrees) that triggers a broadcast when exceeded.")]
+    public float rotationThreshold = 0.5f;
+
+    // internal tracking for throttled broadcasts
+    float lastBroadcastTime = 0f;
+    Vector3 lastBroadcastPos = Vector3.zero;
+    Quaternion lastBroadcastRot = Quaternion.identity;
+    Vector3 lastBroadcastScale = Vector3.one;
     
     private Vector3 savedPosition;
     private Quaternion savedRotation;
@@ -46,7 +67,7 @@ public class MeshAlignmentManager : MonoBehaviourPunCallbacks
                 meshToAlign = meshObj.transform;
         }
         
-        if (meshToAlign != null)
+        if (meshToAlign != null && autoLoadAlignment)
             LoadAlignment();
     }
 
@@ -60,132 +81,141 @@ public class MeshAlignmentManager : MonoBehaviourPunCallbacks
 
     void HandleVRControllerInput()
     {
-        // VR controller input handling
+        // VR controller input handling for left/right split controls
         float dt = Time.deltaTime;
-        
-        // Get the input device for the selected controller
-        InputDevice controller = InputDevices.GetDeviceAtXRNode(controllerNode);
-        
-        if (!controller.isValid)
+
+        // Get both input devices
+        InputDevice left = InputDevices.GetDeviceAtXRNode(XRNode.LeftHand);
+        InputDevice right = InputDevices.GetDeviceAtXRNode(XRNode.RightHand);
+
+        if (!left.isValid && !right.isValid)
         {
-            Debug.LogWarning("VR Controller not found or not valid. Make sure XR is initialized.");
+            Debug.LogWarning("VR Controllers not found or not valid. Make sure XR is initialized.");
             return;
         }
-        else
-        {
-            Debug.Log("<color=green>VR Controller connected for mesh alignment.</color>");
-        }
-        
-        // Check grip button to enable/disable alignment mode
-        if (controller.TryGetFeatureValue(CommonUsages.grip, out float gripValue))
-        {
-            bool wasEnabled = alignmentModeEnabled;
-            alignmentModeEnabled = (gripValue > gripThreshold);
-            
-            if (alignmentModeEnabled && !wasEnabled)
-            {
-                Debug.Log("<color=green>VR Mesh alignment mode: ON (Grip pressed)</color>");
-            }
-            else if (!alignmentModeEnabled && wasEnabled)
-            {
-                Debug.Log("<color=yellow>VR Mesh alignment mode: OFF (Grip released)</color>");
-            }
-        }
-        
+
+        // Check grip buttons on both controllers to enable/disable alignment mode
+        bool leftGripPressed = false;
+        bool rightGripPressed = false;
+        if (left.isValid && left.TryGetFeatureValue(CommonUsages.grip, out float lg))
+            leftGripPressed = (lg > gripThreshold);
+        if (right.isValid && right.TryGetFeatureValue(CommonUsages.grip, out float rg))
+            rightGripPressed = (rg > gripThreshold);
+
+        bool wasEnabled = alignmentModeEnabled;
+        // Enable alignment if either controller grip is pressed
+        alignmentModeEnabled = leftGripPressed || rightGripPressed;
+
+        if (alignmentModeEnabled && !wasEnabled)
+            Debug.Log("<color=green>VR Mesh alignment mode: ON (Grip pressed)</color>");
+        else if (!alignmentModeEnabled && wasEnabled)
+            Debug.Log("<color=yellow>VR Mesh alignment mode: OFF (Grip released)</color>");
+
         if (!alignmentModeEnabled)
             return;
-        
-        // === POSITION CONTROL ===
-        // Use primary 2D axis (thumbstick) for XZ movement
-        if (controller.TryGetFeatureValue(CommonUsages.primary2DAxis, out Vector2 primary2DAxis))
+
+        // --- Right controller: Movement on XZ plane (Y is height) ---
+        if (right.isValid)
         {
-            if (primary2DAxis.magnitude > 0.1f) // Dead zone
+            if (right.TryGetFeatureValue(CommonUsages.primary2DAxis, out Vector2 rightAxis))
             {
-                Vector3 movement = new Vector3(primary2DAxis.x, 0f, primary2DAxis.y);
-                meshToAlign.position += movement * moveSpeed * vrAdjustSpeed * dt;
-            }
-        }
-        
-        // Use trigger for vertical movement (Y axis)
-        if (controller.TryGetFeatureValue(CommonUsages.trigger, out float triggerValue))
-        {
-            if (triggerValue > 0.1f) // Dead zone
-            {
-                // Trigger pressed = move up
-                meshToAlign.position += Vector3.up * triggerValue * moveSpeed * vrAdjustSpeed * dt;
-            }
-        }
-        
-        // Use secondary 2D axis for vertical movement (alternative - move down)
-        if (controller.TryGetFeatureValue(CommonUsages.secondary2DAxis, out Vector2 secondary2DAxis))
-        {
-            if (Mathf.Abs(secondary2DAxis.y) > 0.1f) // Dead zone
-            {
-                // Thumbstick Y axis for up/down
-                meshToAlign.position += Vector3.up * secondary2DAxis.y * moveSpeed * vrAdjustSpeed * dt;
-            }
-            
-            // Use secondary thumbstick X for rotation around Y axis
-            if (Mathf.Abs(secondary2DAxis.x) > 0.1f)
-            {
-                meshToAlign.Rotate(Vector3.up, secondary2DAxis.x * rotateSpeed * vrAdjustSpeed * dt, Space.World);
-            }
-        }
-        
-        // === ROTATION CONTROL ===
-        // Use primary button (A/X) + secondary button (B/Y) for rotation
-        bool primaryButtonPressed = false;
-        bool secondaryButtonPressed = false;
-        
-        if (controller.TryGetFeatureValue(CommonUsages.primaryButton, out primaryButtonPressed) && primaryButtonPressed)
-        {
-            // Primary button + thumbstick for pitch/yaw rotation
-            if (controller.TryGetFeatureValue(CommonUsages.primary2DAxis, out Vector2 rotAxis))
-            {
-                if (rotAxis.magnitude > 0.1f)
+                if (rightAxis.magnitude > 0.05f)
                 {
-                    Vector3 rotation = new Vector3(-rotAxis.y, rotAxis.x, 0f);
-                    meshToAlign.Rotate(rotation * rotateSpeed * vrAdjustSpeed * dt, Space.World);
+                    // Move relative to player's facing direction (camera forward/right)
+                    Transform head = Camera.main != null ? Camera.main.transform : null;
+                    Vector3 camForward = head != null ? head.forward : Vector3.forward;
+                    Vector3 camRight = head != null ? head.right : Vector3.right;
+                    camForward.y = 0f;
+                    camRight.y = 0f;
+                    camForward.Normalize();
+                    camRight.Normalize();
+
+                    Vector3 movement = camRight * rightAxis.x + camForward * rightAxis.y;
+                    meshToAlign.position += movement * moveSpeed * vrAdjustSpeed * dt;
                 }
             }
-        }
-        
-        if (controller.TryGetFeatureValue(CommonUsages.secondaryButton, out secondaryButtonPressed) && secondaryButtonPressed)
-        {
-            // Secondary button + thumbstick for roll rotation
-            if (controller.TryGetFeatureValue(CommonUsages.primary2DAxis, out Vector2 rollAxis))
+
+            // Vertical movement (height) using trigger on right controller
+            if (right.TryGetFeatureValue(CommonUsages.trigger, out float rightTrigger))
             {
-                if (Mathf.Abs(rollAxis.x) > 0.1f)
+                if (rightTrigger > 0.1f)
                 {
-                    meshToAlign.Rotate(Vector3.forward, rollAxis.x * rotateSpeed * vrAdjustSpeed * dt, Space.World);
+                    meshToAlign.position += Vector3.up * rightTrigger * moveSpeed * vrAdjustSpeed * dt;
                 }
             }
-        }
-        
-        // === SCALE CONTROL ===
-        // Use D-pad up/down for scaling
-        if (controller.TryGetFeatureValue(CommonUsages.primary2DAxis, out Vector2 dpadAxis))
-        {
-            // Check if primary button is NOT pressed (to avoid conflict with rotation)
-            if (!primaryButtonPressed && !secondaryButtonPressed)
+
+            // Secondary axis on right can also move up/down if used
+            if (right.TryGetFeatureValue(CommonUsages.secondary2DAxis, out Vector2 rightSecondAxis))
             {
-                // Use thumbstick up/down for fine scale adjustment
-                if (Mathf.Abs(dpadAxis.y) > 0.8f) // Only at extreme positions
+                if (Mathf.Abs(rightSecondAxis.y) > 0.1f)
+                    meshToAlign.position += Vector3.up * rightSecondAxis.y * moveSpeed * vrAdjustSpeed * dt;
+
+                // Use secondary thumbstick X on right to rotate around Y if needed
+                if (Mathf.Abs(rightSecondAxis.x) > 0.1f)
+                    meshToAlign.Rotate(Vector3.up, rightSecondAxis.x * rotateSpeed * vrAdjustSpeed * dt, Space.World);
+            }
+        }
+
+        // --- Left controller: Rotation around Y axis ---
+        if (left.isValid)
+        {
+            if (left.TryGetFeatureValue(CommonUsages.primary2DAxis, out Vector2 leftAxis))
+            {
+                // Only X axis of left thumbstick controls yaw (rotation around Y)
+                if (Mathf.Abs(leftAxis.x) > 0.1f)
                 {
-                    float scaleChange = dpadAxis.y * scaleSpeed * vrAdjustSpeed * dt;
-                    meshToAlign.localScale += Vector3.one * scaleChange;
-                    meshToAlign.localScale = Vector3.Max(meshToAlign.localScale, Vector3.one * 0.01f);
+                    meshToAlign.Rotate(Vector3.up, leftAxis.x * rotateSpeed * vrAdjustSpeed * dt, Space.World);
                 }
             }
         }
         
         // === SAVE/LOAD ===
-        // Use menu button to save
-        if (controller.TryGetFeatureValue(CommonUsages.menuButton, out bool menuPressed) && menuPressed)
+        // Use menu button on either controller to save
+        bool menuPressed = false;
+        if ((right.isValid && right.TryGetFeatureValue(CommonUsages.menuButton, out menuPressed) && menuPressed) ||
+            (left.isValid && left.TryGetFeatureValue(CommonUsages.menuButton, out menuPressed) && menuPressed))
         {
             SaveAlignment();
             BroadcastAlignment();
             Debug.Log("<color=green>VR: Alignment saved and broadcasted!</color>");
+        }
+
+        // Realtime broadcasting while actively aligning
+        if (broadcastRealtime && alignmentModeEnabled)
+        {
+            float now = Time.time;
+            Vector3 curPos = meshToAlign.position;
+            Quaternion curRot = meshToAlign.rotation;
+            Vector3 curScale = meshToAlign.localScale;
+
+            bool timeOk = (now - lastBroadcastTime) >= broadcastInterval;
+            bool posChanged = Vector3.Distance(curPos, lastBroadcastPos) > positionThreshold;
+            bool rotChanged = Quaternion.Angle(curRot, lastBroadcastRot) > rotationThreshold;
+            bool scaleChanged = Vector3.Distance(curScale, lastBroadcastScale) > positionThreshold;
+
+            if (timeOk && (posChanged || rotChanged || scaleChanged))
+            {
+                if (PhotonNetwork.InRoom)
+                {
+                    // Send alignment via RaiseEvent (same as BroadcastAlignment method)
+                    const byte alignmentEventCode = 101;
+                    object[] content = new object[] {
+                        curPos.x, curPos.y, curPos.z,
+                        curRot.x, curRot.y, curRot.z, curRot.w,
+                        curScale.x, curScale.y, curScale.z
+                    };
+
+                    var options = new RaiseEventOptions { Receivers = ReceiverGroup.Others };
+                    PhotonNetwork.RaiseEvent(alignmentEventCode, content, options, SendOptions.SendReliable);
+
+                    lastBroadcastTime = now;
+                    lastBroadcastPos = curPos;
+                    lastBroadcastRot = curRot;
+                    lastBroadcastScale = curScale;
+                    
+                    Debug.Log("<color=cyan>VR: Broadcasting realtime mesh alignment update...</color>");
+                }
+            }
         }
     }
 
@@ -198,20 +228,23 @@ public class MeshAlignmentManager : MonoBehaviourPunCallbacks
         savedRotation = meshToAlign.rotation;
         savedScale = meshToAlign.localScale;
 
-        PlayerPrefs.SetFloat(saveKey + "PosX", savedPosition.x);
-        PlayerPrefs.SetFloat(saveKey + "PosY", savedPosition.y);
-        PlayerPrefs.SetFloat(saveKey + "PosZ", savedPosition.z);
-        
-        PlayerPrefs.SetFloat(saveKey + "RotX", savedRotation.x);
-        PlayerPrefs.SetFloat(saveKey + "RotY", savedRotation.y);
-        PlayerPrefs.SetFloat(saveKey + "RotZ", savedRotation.z);
-        PlayerPrefs.SetFloat(saveKey + "RotW", savedRotation.w);
-        
-        PlayerPrefs.SetFloat(saveKey + "ScaleX", savedScale.x);
-        PlayerPrefs.SetFloat(saveKey + "ScaleY", savedScale.y);
-        PlayerPrefs.SetFloat(saveKey + "ScaleZ", savedScale.z);
-        
-        PlayerPrefs.Save();
+        if (persistToPlayerPrefs)
+        {
+            PlayerPrefs.SetFloat(saveKey + "PosX", savedPosition.x);
+            PlayerPrefs.SetFloat(saveKey + "PosY", savedPosition.y);
+            PlayerPrefs.SetFloat(saveKey + "PosZ", savedPosition.z);
+            
+            PlayerPrefs.SetFloat(saveKey + "RotX", savedRotation.x);
+            PlayerPrefs.SetFloat(saveKey + "RotY", savedRotation.y);
+            PlayerPrefs.SetFloat(saveKey + "RotZ", savedRotation.z);
+            PlayerPrefs.SetFloat(saveKey + "RotW", savedRotation.w);
+            
+            PlayerPrefs.SetFloat(saveKey + "ScaleX", savedScale.x);
+            PlayerPrefs.SetFloat(saveKey + "ScaleY", savedScale.y);
+            PlayerPrefs.SetFloat(saveKey + "ScaleZ", savedScale.z);
+            
+            PlayerPrefs.Save();
+        }
         
         Debug.Log($"<color=green>✓ Mesh alignment saved!</color>\nPos: {savedPosition}\nRot: {savedRotation.eulerAngles}\nScale: {savedScale}");
     }
@@ -220,6 +253,11 @@ public class MeshAlignmentManager : MonoBehaviourPunCallbacks
     {
         if (meshToAlign == null)
             return;
+        if (!persistToPlayerPrefs)
+        {
+            Debug.Log("PlayerPrefs persistence is disabled; LoadAlignment skipped.");
+            return;
+        }
 
         if (PlayerPrefs.HasKey(saveKey + "PosX"))
         {
@@ -250,29 +288,62 @@ public class MeshAlignmentManager : MonoBehaviourPunCallbacks
         }
     }
 
+    /// <summary>
+    /// Deletes saved PlayerPrefs keys for this mesh alignment (if persistence is enabled).
+    /// </summary>
+    public void ClearSavedAlignment()
+    {
+        //Because if using PlayerPrefs, implementing calibration become complex 
+        if (!persistToPlayerPrefs)
+        {
+            Debug.Log("PlayerPrefs persistence is disabled; nothing to clear.");
+            return;
+        }
+
+        PlayerPrefs.DeleteKey(saveKey + "PosX");
+        PlayerPrefs.DeleteKey(saveKey + "PosY");
+        PlayerPrefs.DeleteKey(saveKey + "PosZ");
+
+        PlayerPrefs.DeleteKey(saveKey + "RotX");
+        PlayerPrefs.DeleteKey(saveKey + "RotY");
+        PlayerPrefs.DeleteKey(saveKey + "RotZ");
+        PlayerPrefs.DeleteKey(saveKey + "RotW");
+
+        PlayerPrefs.DeleteKey(saveKey + "ScaleX");
+        PlayerPrefs.DeleteKey(saveKey + "ScaleY");
+        PlayerPrefs.DeleteKey(saveKey + "ScaleZ");
+
+        PlayerPrefs.Save();
+        Debug.Log("Cleared saved mesh alignment PlayerPrefs.");
+    }
+
     void BroadcastAlignment()
     {
-        if (!PhotonNetwork.InRoom || photonView == null)
+        if (!PhotonNetwork.InRoom)
+        {
+            Debug.LogWarning("Cannot broadcast alignment: Not in a Photon room.");
             return;
-
-        photonView.RPC("ReceiveAlignment", RpcTarget.Others,
+        }
+        
+        Debug.Log("<color=cyan>Broadcasting mesh alignment to other users...</color>");
+        
+        // Send alignment via Photon RaiseEvent so any client can receive it
+        // without requiring a matching PhotonView instance
+        const byte alignmentEventCode = 101;
+        object[] content = new object[] {
             savedPosition.x, savedPosition.y, savedPosition.z,
             savedRotation.x, savedRotation.y, savedRotation.z, savedRotation.w,
-            savedScale.x, savedScale.y, savedScale.z);
-    }
+            savedScale.x, savedScale.y, savedScale.z
+        };
 
-    [PunRPC]
-    void ReceiveAlignment(float px, float py, float pz, float rx, float ry, float rz, float rw, float sx, float sy, float sz)
-    {
-        if (meshToAlign == null)
-            return;
-
-        meshToAlign.position = new Vector3(px, py, pz);
-        meshToAlign.rotation = new Quaternion(rx, ry, rz, rw);
-        meshToAlign.localScale = new Vector3(sx, sy, sz);
+        var options = new RaiseEventOptions { Receivers = ReceiverGroup.Others };
+        PhotonNetwork.RaiseEvent(alignmentEventCode, content, options, SendOptions.SendReliable);
         
-        Debug.Log("<color=cyan>Received mesh alignment from remote user</color>");
+        Debug.Log($"<color=green>Sent alignment event: Pos({savedPosition}), Rot({savedRotation.eulerAngles}), Scale({savedScale})</color>");
     }
+
+    // Note: ReceiveAlignment is now handled by NetworkedDataReceiver via Photon events
+    // (removed local RPC handler to avoid confusion)
 
     void OnGUI()
     {

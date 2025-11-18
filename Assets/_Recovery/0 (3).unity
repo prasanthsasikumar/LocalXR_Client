@@ -1473,7 +1473,6 @@ GameObject:
   - component: {fileID: 1734973015}
   - component: {fileID: 1734973014}
   - component: {fileID: 1734973017}
-  - component: {fileID: 1734973018}
   m_Layer: 0
   m_Name: SceneManager
   m_TagString: Untagged
@@ -1510,16 +1509,9 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 5d01edb08fde2c645ae6f113d0dccf63, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::GazeVisualizer
-  gazeColor:
-    r: 1
-    g: 0
-    b: 0
-    a: 1
+  gazeColor: {r: 1, g: 0, b: 0, a: 1}
   sphereSize: 0.05
   followGaze: 1
-  sphereRenderer: {fileID: 0}
-  currentGazeWorldPosition: {x: 0, y: 0, z: 0}
-  hasValidGaze: 0
 --- !u!4 &1734973016
 Transform:
   m_ObjectHideFlags: 0
@@ -1548,7 +1540,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::MeshAlignmentManager
   meshToAlign: {fileID: 1999750833}
-  alignmentModeEnabled: 0
+  alignmentModeEnabled: 1
   controllerNode: 5
   vrAdjustSpeed: 1
   gripThreshold: 0.5
@@ -1556,34 +1548,6 @@ MonoBehaviour:
   rotateSpeed: 30
   scaleSpeed: 0.1
   saveKey: MeshAlignment_
-  autoLoadAlignment: 0
-  persistToPlayerPrefs: 0
-  broadcastRealtime: 1
-  broadcastInterval: 0.1
-  positionThreshold: 0.001
-  rotationThreshold: 0.5
---- !u!114 &1734973018
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 1734973013}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: aa584fbee541324448dd18d8409c7a41, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: PhotonUnityNetworking::Photon.Pun.PhotonView
-  ObservedComponentsFoldoutOpen: 1
-  Group: 0
-  prefixField: -1
-  Synchronization: 3
-  OwnershipTransfer: 0
-  observableSearch: 2
-  ObservedComponents: []
-  sceneViewId: 1
-  InstantiationId: 0
-  isRuntimeInstantiated: 0
 --- !u!1001 &1745996862
 PrefabInstance:
   m_ObjectHideFlags: 0
